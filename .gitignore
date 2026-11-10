@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+secrets/
+
+# Data & checkpoints (KHÔNG push lên GitHub)
+data/
+datasets/
+checkpoints/
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+
+# Logs / cache
+logs/
+runs/
+wandb/
+*.log
+cache/
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
