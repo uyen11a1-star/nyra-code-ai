@@ -11,7 +11,6 @@ from model.transformer import NyraModel
 from tokenizer.tokenizer import NyraTokenizer
 from tokenizers import Tokenizer
 
-# --- TỐI ƯU: Sử dụng PyTorch IterableDataset ---
 class StreamingTokenDataset(IterableDataset):
     def __init__(self, hf_dataset, tokenizer, seq_len):
         self.hf_dataset = hf_dataset
@@ -24,16 +23,12 @@ class StreamingTokenDataset(IterableDataset):
             if "content" in item and item["content"] is not None:
                 tokens = self.tokenizer.encode(item["content"]).ids
                 buffer.extend(tokens)
-                
-                # Nhả ra từng chunk có độ dài seq_len + 1 (để làm x_input và y_target)
                 while len(buffer) >= self.seq_len + 1:
                     chunk = buffer[:self.seq_len + 1]
                     yield torch.tensor(chunk, dtype=torch.long)
-                    buffer = buffer[self.seq_len:] # Trượt cửa sổ (có thể dùng stride)
+                    buffer = buffer[self.seq_len:] 
 
 def collate_fn(batch):
-    # batch là list các tensor có shape (seq_len + 1)
-    # Xếp chồng chúng lại thành (batch_size, seq_len + 1)
     x = torch.stack([item[:-1] for item in batch])
     y = torch.stack([item[1:] for item in batch])
     return x, y
@@ -73,13 +68,14 @@ def train_real():
         print(f"Resume từ step {start_step} (Đã học {total_tokens_trained:,} tokens)")
 
     print("Đang kết nối Streaming Dataset...")
-    # HF_TOKEN sẽ tự động được nhận diện từ biến môi trường
     ds = load_dataset("codeparrot/codeparrot-clean", split="train", streaming=True)
     
-    # --- TỐI ƯU: Cấu hình DataLoader Đa luồng ---
-    BATCH_SIZE = 64         # Tăng Batch Size
-    SEQ_LEN = 2048          # Tăng Sequence Length
-    NUM_WORKERS = 4         # Số luồng CPU đọc dữ liệu song song
+    # CẤU HÌNH CHỐNG OOM (Gradient Accumulation)
+    BATCH_SIZE = 16          # Giảm batch size thực tế trên VRAM
+    SEQ_LEN = 1024           # Giữ seq len vừa phải
+    GRAD_ACCUM = 8           # Tích lũy 8 bước -> Tương đương Batch Size = 128
+    
+    NUM_WORKERS = 4          # Đọc dữ liệu đa luồng
     
     dataset = StreamingTokenDataset(ds, hf_tokenizer, SEQ_LEN)
     dataloader = DataLoader(
@@ -93,46 +89,56 @@ def train_real():
     model.train()
     step = start_step
     TARGET_TOKENS = 5_000_000_000
-    tokens_per_step = BATCH_SIZE * SEQ_LEN
+    
+    # Tổng token thực tế học được trong 1 vòng lặp (step)
+    tokens_per_step = BATCH_SIZE * SEQ_LEN * GRAD_ACCUM
     max_steps = TARGET_TOKENS // tokens_per_step
     
     start_time = time.time()
-    print(f"Mục tiêu: {TARGET_TOKENS:,} tokens | Batch: {BATCH_SIZE} | Seq: {SEQ_LEN} | Tokens/step: {tokens_per_step:,}")
+    print(f"Mục tiêu: {TARGET_TOKENS:,} tokens | Batch: {BATCH_SIZE}x{GRAD_ACCUM} | Seq: {SEQ_LEN}")
+    print(f"Tokens/step: {tokens_per_step:,} | Tổng số step: {max_steps:,}")
 
-    for x, y in dataloader:
+    optimizer.zero_grad()
+    
+    for i, (x, y) in enumerate(dataloader):
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         
-        optimizer.zero_grad()
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
             logits = model(x)
             loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+            # Chia loss cho số bước tích lũy
+            loss = loss / GRAD_ACCUM 
 
         scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad()
 
-        total_tokens_trained += tokens_per_step
-        
-        if step % 10 == 0:
-            elapsed = time.time() - start_time
-            tokens_per_sec = tokens_per_step / elapsed if elapsed > 0 else 0
-            print(f"Step {step} | Loss: {loss.item():.4f} | Tokens: {total_tokens_trained:,} / {TARGET_TOKENS:,} | Speed: {tokens_per_sec:.0f} tok/s")
-            start_time = time.time()
+        # Chỉ cập nhật trọng số khi đã tích lũy đủ
+        if (i + 1) % GRAD_ACCUM == 0:
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
 
-        if step > 0 and step % 500 == 0:
-            torch.save({
-                'step': step,
-                'total_tokens': total_tokens_trained,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-            }, checkpoint_path)
-            print(f"-> Đã lưu checkpoint tại step {step}")
+            total_tokens_trained += tokens_per_step
+            
+            if step % 10 == 0:
+                elapsed = time.time() - start_time
+                tokens_per_sec = tokens_per_step / elapsed if elapsed > 0 else 0
+                # Nhân lại loss thực tế để in ra
+                print(f"Step {step} | Loss: {loss.item() * GRAD_ACCUM:.4f} | Tokens: {total_tokens_trained:,} / {TARGET_TOKENS:,} | Speed: {tokens_per_sec:.0f} tok/s")
+                start_time = time.time()
 
-        step += 1
-        if step >= max_steps:
-            print(f"🎉 ĐÃ ĐẠT MỤC TIÊU {TARGET_TOKENS:,} TOKENS!")
-            return
+            if step > 0 and step % 500 == 0:
+                torch.save({
+                    'step': step,
+                    'total_tokens': total_tokens_trained,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                }, checkpoint_path)
+                print(f"-> Đã lưu checkpoint tại step {step}")
+
+            step += 1
+            if step >= max_steps:
+                print(f"🎉 ĐÃ ĐẠT MỤC TIÊU {TARGET_TOKENS:,} TOKENS!")
+                return
 
 if __name__ == "__main__":
     train_real()
