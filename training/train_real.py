@@ -58,44 +58,50 @@ def train_real():
 
     model.train()
     step = start_step
-    max_steps = 50000 # Tăng số step lên để train lâu hơn
+    max_steps = 50000 
     
-    # TỐI ƯU: Tăng Batch Size và Seq Len
-    BATCH_SIZE = 128
+    # TỐI ƯU: Dùng Batch nhỏ hơn nhưng tích lũy Gradient (Gradient Accumulation)
+    # Tương đương với Batch Size = 32 * 4 = 128
+    BATCH_SIZE = 32
     SEQ_LEN = 1024
+    GRAD_ACCUM = 4 
+    
     tokens_needed = BATCH_SIZE * SEQ_LEN
-
     batch_tokens = []
     start_time = time.time()
 
-    print(f"Bắt đầu train (Batch: {BATCH_SIZE}, Seq: {SEQ_LEN})...")
-    
+    print(f"Bắt đầu train (Batch: {BATCH_SIZE}, Seq: {SEQ_LEN}, Grad Accum: {GRAD_ACCUM})...")
+    optimizer.zero_grad()
+
     for batch_texts in batch_iterator(batch_size=1000):
         encodings = hf_tokenizer.encode_batch(batch_texts)
         for enc in encodings:
             batch_tokens.extend(enc.ids)
             
             while len(batch_tokens) >= tokens_needed:
-                # TỐI ƯU: Dùng Tensor và view trực tiếp thay vì vòng lặp
                 chunk = torch.tensor(batch_tokens[:tokens_needed], dtype=torch.long).view(BATCH_SIZE, SEQ_LEN)
                 x = chunk[:, :-1].to(device)
                 y = chunk[:, 1:].to(device)
                 
-                # Xóa phần đã dùng bằng del (nhanh hơn gán lại mảng)
                 del batch_tokens[:tokens_needed]
                 
-                optimizer.zero_grad()
                 with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
                     logits = model(x)
                     loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                    # Chia loss cho số bước tích lũy
+                    loss = loss / GRAD_ACCUM 
 
                 scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
+
+                # Chỉ cập nhật trọng số khi đã tích lũy đủ
+                if (step + 1) % GRAD_ACCUM == 0:
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
 
                 if step % 10 == 0:
-                    print(f"Step {step} | Loss: {loss.item():.4f} | Time: {time.time() - start_time:.2f}s | Tokens/s: {tokens_needed/(time.time() - start_time):.0f}")
+                    # In loss thực tế (nhân lại với GRAD_ACCUM)
+                    print(f"Step {step} | Loss: {loss.item() * GRAD_ACCUM:.4f} | Time: {time.time() - start_time:.2f}s | Tokens/s: {(tokens_needed*GRAD_ACCUM)/(time.time() - start_time):.0f}")
                     start_time = time.time()
 
                 if step > 0 and step % 500 == 0:
