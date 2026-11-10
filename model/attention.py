@@ -23,7 +23,7 @@ class NyraAttention(nn.Module):
             max_position_embeddings=config.max_position_embeddings
         )
 
-    def forward(self, hidden_states, attention_mask=None, position_ids=None):
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, past_key_value=None, use_cache=False):
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
@@ -38,20 +38,30 @@ class NyraAttention(nn.Module):
         cos, sin = self.rotary_emb(value_states, position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        # GQA (Grouped Query Attention) Expand KV if needed
+        # TÍCH HỢP KV CACHE TẠI ĐÂY
+        if past_key_value is not None:
+            # past_key_value là tuple (past_k, past_v), shape: [bsz, num_kv_heads, past_len, head_dim]
+            key_states = torch.cat([past_key_value[0], key_states], dim=2)
+            value_states = torch.cat([past_key_value[1], value_states], dim=2)
+
+        # Lưu cache trả về
+        present_key_value = (key_states, value_states) if use_cache else None
+
+        # GQA: Expand KV heads để khớp với số Q heads
         if self.num_key_value_groups > 1:
             key_states = key_states.repeat_interleave(self.num_key_value_groups, dim=1)
             value_states = value_states.repeat_interleave(self.num_key_value_groups, dim=1)
 
-        # Sử dụng Scaled Dot-Product Attention (Tích hợp Flash Attention nếu có GPU)
+        # is_causal chỉ bật khi q_len > 1 (prefill). Khi decode q_len=1 thì không cần mask.
+        is_causal = (q_len > 1) and (attention_mask is None)
+        
         attn_output = F.scaled_dot_product_attention(
             query_states, key_states, value_states,
             attn_mask=attention_mask,
-            is_causal=True if attention_mask is None else False
+            is_causal=is_causal
         )
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+        attn_output = attn_output.transpose(1, 2).contiguous().reshape(bsz, q_len, self.hidden_size)
         attn_output = self.o_proj(attn_output)
         
-        return attn_output
+        return attn_output, present_key_value
