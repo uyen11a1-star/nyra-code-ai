@@ -20,7 +20,7 @@ def check_parameters():
     print(f"Trainable Params: {trainable_params:,}")
     print("="*40)
     
-    assert 280_000_000 < total_params < 320_000_000, "Số lượng params không nằm trong khoảng 300M!"
+    assert 290_000_000 < total_params < 310_000_000, "Số lượng params không nằm trong khoảng 300M!"
     print("✅ ĐẠT CHUẨN MỤC TIÊU ~300M PARAMETERS.")
     
     # Test forward pass với dữ liệu giả

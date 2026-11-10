@@ -6,7 +6,7 @@ class NyraConfig:
     vocab_size: int = 32000       # Vocab size cho code + text
     hidden_size: int = 1024       # D (Embedding dim)
     intermediate_size: int = 2752 # FFN dim (khoảng 2.68 * D)
-    num_hidden_layers: int = 24   # L (Số layer)
+    num_hidden_layers: int = 21   # L (Số layer)
     num_attention_heads: int = 16 # H (Head dim = 64)
     num_key_value_heads: int = 16 # GQA (bằng số heads tức là MHA thường)
     
