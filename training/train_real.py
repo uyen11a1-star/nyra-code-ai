@@ -43,7 +43,8 @@ def train_real():
     print("Đang kết nối Streaming Dataset...")
     ds = load_dataset("codeparrot/codeparrot-clean", split="train", streaming=True)
     
-    def batch_iterator(batch_size=1000):
+    # GIỮ NGUYÊN BATCH SIZE 100 NHƯ CODE CŨ ĐỂ KHÔNG BỊ TREO
+    def batch_iterator(batch_size=100):
         batch = []
         for item in ds:
             batch.append(item["content"])
@@ -53,27 +54,26 @@ def train_real():
         if batch:
             yield batch
 
+    print("Bắt đầu tokenize dữ liệu...")
     from tokenizers import Tokenizer
     hf_tokenizer = Tokenizer.from_file(tokenizer_path)
 
     model.train()
     step = start_step
-    max_steps = 50000 
+    max_steps = 10000 
     
-    # TỐI ƯU: Dùng Batch nhỏ hơn nhưng tích lũy Gradient (Gradient Accumulation)
-    # Tương đương với Batch Size = 32 * 4 = 128
-    BATCH_SIZE = 32
-    SEQ_LEN = 1024
-    GRAD_ACCUM = 4 
-    
+    # TỐI ƯU AN TOÀN: Batch 64, Seq 512 (Bằng đúng code cũ nhưng gấp đôi batch)
+    BATCH_SIZE = 64
+    SEQ_LEN = 512
     tokens_needed = BATCH_SIZE * SEQ_LEN
+
     batch_tokens = []
     start_time = time.time()
 
-    print(f"Bắt đầu train (Batch: {BATCH_SIZE}, Seq: {SEQ_LEN}, Grad Accum: {GRAD_ACCUM})...")
-    optimizer.zero_grad()
-
-    for batch_texts in batch_iterator(batch_size=1000):
+    print(f"Bắt đầu train (Batch: {BATCH_SIZE}, Seq: {SEQ_LEN})...")
+    
+    for batch_texts in batch_iterator(batch_size=100):
+        print(f"-> Đang lấy thêm 100 file code từ Hugging Face...") # In ra để bạn biết nó không bị treo
         encodings = hf_tokenizer.encode_batch(batch_texts)
         for enc in encodings:
             batch_tokens.extend(enc.ids)
@@ -85,23 +85,18 @@ def train_real():
                 
                 del batch_tokens[:tokens_needed]
                 
+                optimizer.zero_grad()
                 with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
                     logits = model(x)
                     loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
-                    # Chia loss cho số bước tích lũy
-                    loss = loss / GRAD_ACCUM 
 
                 scaler.scale(loss).backward()
-
-                # Chỉ cập nhật trọng số khi đã tích lũy đủ
-                if (step + 1) % GRAD_ACCUM == 0:
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad()
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
                 if step % 10 == 0:
-                    # In loss thực tế (nhân lại với GRAD_ACCUM)
-                    print(f"Step {step} | Loss: {loss.item() * GRAD_ACCUM:.4f} | Time: {time.time() - start_time:.2f}s | Tokens/s: {(tokens_needed*GRAD_ACCUM)/(time.time() - start_time):.0f}")
+                    print(f"Step {step} | Loss: {loss.item():.4f} | Time: {time.time() - start_time:.2f}s | Tokens/s: {tokens_needed/(time.time() - start_time):.0f}")
                     start_time = time.time()
 
                 if step > 0 and step % 500 == 0:
