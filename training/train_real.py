@@ -18,7 +18,6 @@ def train_real():
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)
     scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
 
-    # Tự động tạo Tokenizer nếu chưa có
     tokenizer_path = "tokenizer/saved/tokenizer.json"
     if not os.path.exists(tokenizer_path):
         print("Chưa tìm thấy Tokenizer, đang tự động tạo mới...")
@@ -30,7 +29,6 @@ def train_real():
 
     tokenizer = NyraTokenizer(tokenizer_path)
 
-    # Cơ chế Resume
     checkpoint_path = "checkpoints/nyra_model_latest.pt"
     os.makedirs("checkpoints", exist_ok=True)
     start_step = 0
@@ -44,21 +42,24 @@ def train_real():
         total_tokens_trained = checkpoint.get('total_tokens', 0)
         print(f"Resume từ step {start_step} (Đã học {total_tokens_trained:,} tokens)")
 
-    print("Đang kết nối Streaming Datasets (Code + Wikipedia)...")
-    # 1. Dataset Code (Python)
+    print("Đang kết nối Streaming Datasets...")
     ds_code = load_dataset("codeparrot/codeparrot-clean", split="train", streaming=True)
-    # 2. Dataset Văn bản (Wikipedia)
     ds_wiki = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", streaming=True)
     
-    # Trộn dữ liệu: 80% Code, 20% Wikipedia
     ds = interleave_datasets([ds_code, ds_wiki], probabilities=[0.8, 0.2], seed=42)
     
     def batch_iterator(batch_size=200):
         batch = []
         for item in ds:
-            # Lấy nội dung từ cột 'content' (code) hoặc 'text' (wiki)
-            text = item.get("content", item.get("text", ""))
-            batch.append(text)
+            # SỬA LỖI TẠI ĐÂY: Lấy dữ liệu an toàn, bỏ qua nếu rỗng
+            if "content" in item and item["content"] is not None:
+                text = item["content"]
+            elif "text" in item and item["text"] is not None:
+                text = item["text"]
+            else:
+                continue # Bỏ qua nếu không có dữ liệu
+            
+            batch.append(str(text)) # Ép kiểu chắc chắn thành string
             if len(batch) == batch_size:
                 yield batch
                 batch = []
@@ -71,12 +72,10 @@ def train_real():
 
     model.train()
     step = start_step
-    # Mục tiêu 5 Tỷ tokens. BATCH_SIZE * SEQ_LEN = 32 * 1024 = 32,768 tokens/step
     TARGET_TOKENS = 5_000_000_000
     BATCH_SIZE = 32
     SEQ_LEN = 1024
     tokens_per_step = BATCH_SIZE * SEQ_LEN
-    # Số step cần thiết (tính từ đầu)
     max_steps = TARGET_TOKENS // tokens_per_step
     
     batch_tokens = []
@@ -86,6 +85,11 @@ def train_real():
     print(f"Tổng số step cần: {max_steps:,} (Đã chạy: {step:,})")
     
     for batch_texts in batch_iterator(batch_size=200):
+        # Lọc lại lần nữa cho chắc chắn 100% không có phần tử None
+        batch_texts = [t for t in batch_texts if t]
+        if not batch_texts:
+            continue
+            
         encodings = hf_tokenizer.encode_batch(batch_texts)
         for enc in encodings:
             batch_tokens.extend(enc.ids)
@@ -115,7 +119,6 @@ def train_real():
                     print(f"Step {step} | Loss: {loss.item():.4f} | Tokens: {total_tokens_trained:,}/{TARGET_TOKENS:,} | Speed: {tokens_per_sec:.0f} tok/s")
                     start_time = time.time()
 
-                # Lưu checkpoint mỗi 500 steps
                 if step > 0 and step % 500 == 0:
                     torch.save({
                         'step': step,
@@ -123,17 +126,11 @@ def train_real():
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
                     }, checkpoint_path)
-                    print(f"-> Đã lưu checkpoint tại step {step} (Tổng tokens: {total_tokens_trained:,})")
+                    print(f"-> Đã lưu checkpoint tại step {step}")
 
                 step += 1
                 if step >= max_steps:
                     print(f"🎉 ĐÃ ĐẠT MỤC TIÊU {TARGET_TOKENS:,} TOKENS!")
-                    torch.save({
-                        'step': step,
-                        'total_tokens': total_tokens_trained,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                    }, "checkpoints/nyra_model_final_5B.pt")
                     return
 
 if __name__ == "__main__":
