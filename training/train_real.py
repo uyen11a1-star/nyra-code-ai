@@ -2,25 +2,26 @@ import torch
 import time
 import os
 import sys
-from torch.utils.data import DataLoader
 from datasets import load_dataset
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model.config import NyraConfig
 from model.transformer import NyraModel
-from training.dataset import NyraDataset
 from tokenizer.tokenizer import NyraTokenizer
 
 def train_real():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Thiết bị: {device.type.upper()}")
     config = NyraConfig()
     
-    # 1. Khởi tạo Model & Optimizer
     model = NyraModel(config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)
     scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
 
-    # 2. Cơ chế Resume (Nếu có checkpoint cũ thì load lại)
+    # Load Tokenizer để lấy thông số
+    tokenizer = NyraTokenizer("tokenizer/saved/tokenizer.json")
+
+    # Cơ chế Resume
     checkpoint_path = "checkpoints/nyra_model_latest.pt"
     os.makedirs("checkpoints", exist_ok=True)
     start_step = 0
@@ -32,36 +33,49 @@ def train_real():
         start_step = checkpoint['step']
         print(f"Resume từ step {start_step}")
 
-    # 3. Tải dữ liệu bằng Streaming (Không tải về ổ cứng)
     print("Đang kết nối Streaming Dataset...")
     ds = load_dataset("codeparrot/codeparrot-clean", split="train", streaming=True)
     
-    # Tokenizer
-    tokenizer = NyraTokenizer("tokenizer/saved/tokenizer.json")
+    # TỐI ƯU HÓA: Gom 100 file code lại với nhau để tokenize 1 lần (nhanh hơn rất nhiều)
+    def batch_iterator(batch_size=100):
+        batch = []
+        for item in ds:
+            batch.append(item["content"])
+            if len(batch) == batch_size:
+                yield batch
+                batch = []
+
+    print("Bắt đầu tokenize dữ liệu (Đa luồng)...")
+    # Sử dụng tokenizer của HuggingFace để tokenize song song cực nhanh
+    from tokenizers import Tokenizer
+    hf_tokenizer = Tokenizer.from_file("tokenizer/saved/tokenizer.json")
     
+    # Đưa luồng dữ liệu qua tokenizer
+    tokenized_ds = hf_tokenizer.encode_batch(batch_iterator()) 
+
     model.train()
     step = start_step
-    max_steps = 10000 # Train thử 10,000 steps
+    max_steps = 10000 # Train 10,000 steps
     
-    start_time = time.time()
-    # Batch size 8, mỗi seq 128 token
+    # Tăng kích thước Batch và Seq lên tối đa để tận dụng 102GB VRAM
+    BATCH_SIZE = 32
+    SEQ_LEN = 512
+    tokens_needed = BATCH_SIZE * SEQ_LEN
+
     batch_tokens = []
-    
-    print("Bắt đầu train...")
-    for item in ds:
-        # Mã hóa đoạn code thành token
-        tokens = tokenizer.encode(item["content"])
-        batch_tokens.extend(tokens)
+    start_time = time.time()
+
+    print(f"Bắt đầu train (Batch: {BATCH_SIZE}, Seq: {SEQ_LEN})...")
+    for enc in tokenized_ds:
+        batch_tokens.extend(enc.ids)
         
-        # Khi đủ dữ liệu cho 1 batch
-        while len(batch_tokens) >= (128 * 8):
-            x_batch = []
-            y_batch = []
-            for i in range(8):
-                chunk = batch_tokens[:128]
+        while len(batch_tokens) >= tokens_needed:
+            x_batch, y_batch = [], []
+            for i in range(BATCH_SIZE):
+                chunk = batch_tokens[:SEQ_LEN]
                 x_batch.append(chunk[:-1])
                 y_batch.append(chunk[1:])
-                batch_tokens = batch_tokens[128:] # Xóa phần đã dùng
+                batch_tokens = batch_tokens[SEQ_LEN:]
             
             x = torch.tensor(x_batch, dtype=torch.long).to(device)
             y = torch.tensor(y_batch, dtype=torch.long).to(device)
@@ -77,10 +91,9 @@ def train_real():
             optimizer.zero_grad()
 
             if step % 10 == 0:
-                print(f"Step {step} | Loss: {loss.item():.4f} | Time: {time.time() - start_time:.2f}s")
+                print(f"Step {step} | Loss: {loss.item():.4f} | Time: {time.time() - start_time:.2f}s | Tokens/s: {tokens_needed/(time.time() - start_time):.0f}")
                 start_time = time.time()
 
-            # Lưu Checkpoint mỗi 500 steps
             if step > 0 and step % 500 == 0:
                 torch.save({
                     'step': step,
