@@ -3,6 +3,7 @@ from torch import nn
 import torch.nn.functional as F
 from model.config import NyraConfig
 from model.attention import NyraAttention
+from model.initialization import initialize_weights
 
 class NyraRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -62,6 +63,12 @@ class NyraModel(nn.Module):
         self.norm = NyraRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.embed_tokens.weight
+        
+        # Khởi tạo trọng số
+        initialize_weights(self, config.initializer_range)
+        # Khôi phục lại weight tying sau khi init
         if config.tie_word_embeddings:
             self.lm_head.weight = self.embed_tokens.weight
 
