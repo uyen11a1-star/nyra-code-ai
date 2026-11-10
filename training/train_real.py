@@ -75,7 +75,7 @@ def train_real():
     SEQ_LEN = 1024           # Giữ seq len vừa phải
     GRAD_ACCUM = 8           # Tích lũy 8 bước -> Tương đương Batch Size = 128
     
-    NUM_WORKERS = 4          # Đọc dữ liệu đa luồng
+    NUM_WORKERS = 0          # Đọc dữ liệu đa luồng
     
     dataset = StreamingTokenDataset(ds, hf_tokenizer, SEQ_LEN)
     dataloader = DataLoader(
