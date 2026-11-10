@@ -52,11 +52,12 @@ def train_real():
             if len(batch) == batch_size:
                 yield batch
                 batch = []
+        if batch:
+            yield batch
 
     print("Bắt đầu tokenize dữ liệu (Đa luồng)...")
     from tokenizers import Tokenizer
     hf_tokenizer = Tokenizer.from_file(tokenizer_path)
-    tokenized_ds = hf_tokenizer.encode_batch(batch_iterator()) 
 
     model.train()
     step = start_step
@@ -70,46 +71,50 @@ def train_real():
     start_time = time.time()
 
     print(f"Bắt đầu train (Batch: {BATCH_SIZE}, Seq: {SEQ_LEN})...")
-    for enc in tokenized_ds:
-        batch_tokens.extend(enc.ids)
-        
-        while len(batch_tokens) >= tokens_needed:
-            x_batch, y_batch = [], []
-            for i in range(BATCH_SIZE):
-                chunk = batch_tokens[:SEQ_LEN]
-                x_batch.append(chunk[:-1])
-                y_batch.append(chunk[1:])
-                batch_tokens = batch_tokens[SEQ_LEN:]
+    
+    # ĐÃ SỬA LỖI GENERATOR TẠI ĐÂY
+    for batch_texts in batch_iterator(batch_size=100):
+        encodings = hf_tokenizer.encode_batch(batch_texts)
+        for enc in encodings:
+            batch_tokens.extend(enc.ids)
             
-            x = torch.tensor(x_batch, dtype=torch.long).to(device)
-            y = torch.tensor(y_batch, dtype=torch.long).to(device)
-            
-            optimizer.zero_grad()
-            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
-                logits = model(x)
-                loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+            while len(batch_tokens) >= tokens_needed:
+                x_batch, y_batch = [], []
+                for i in range(BATCH_SIZE):
+                    chunk = batch_tokens[:SEQ_LEN]
+                    x_batch.append(chunk[:-1])
+                    y_batch.append(chunk[1:])
+                    batch_tokens = batch_tokens[SEQ_LEN:]
+                
+                x = torch.tensor(x_batch, dtype=torch.long).to(device)
+                y = torch.tensor(y_batch, dtype=torch.long).to(device)
+                
+                optimizer.zero_grad()
+                with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
+                    logits = model(x)
+                    loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
 
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
-            if step % 10 == 0:
-                print(f"Step {step} | Loss: {loss.item():.4f} | Time: {time.time() - start_time:.2f}s | Tokens/s: {tokens_needed/(time.time() - start_time):.0f}")
-                start_time = time.time()
+                if step % 10 == 0:
+                    print(f"Step {step} | Loss: {loss.item():.4f} | Time: {time.time() - start_time:.2f}s | Tokens/s: {tokens_needed/(time.time() - start_time):.0f}")
+                    start_time = time.time()
 
-            if step > 0 and step % 500 == 0:
-                torch.save({
-                    'step': step,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                }, checkpoint_path)
-                print(f"-> Đã lưu checkpoint tại step {step}")
+                if step > 0 and step % 500 == 0:
+                    torch.save({
+                        'step': step,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                    }, checkpoint_path)
+                    print(f"-> Đã lưu checkpoint tại step {step}")
 
-            step += 1
-            if step >= max_steps:
-                print("Đã đạt số step tối đa.")
-                return
+                step += 1
+                if step >= max_steps:
+                    print("Đã đạt số step tối đa.")
+                    return
 
 if __name__ == "__main__":
     train_real()
