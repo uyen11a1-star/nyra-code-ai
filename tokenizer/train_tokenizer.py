@@ -1,6 +1,5 @@
 import os
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
-from tokenizers.processors import ByteLevel as ByteLevelProcessor
 
 def train_bpe_tokenizer(files_path, output_dir, vocab_size=32000):
     print(f"Bắt đầu train BPE Tokenizer (Vocab: {vocab_size})...")
@@ -13,8 +12,6 @@ def train_bpe_tokenizer(files_path, output_dir, vocab_size=32000):
         special_tokens=["<|endoftext|>", "<|pad|>"],
         show_progress=True
     )
-    
-    # Giả lập đọc dữ liệu
     tokenizer.train(files=files_path, trainer=trainer)
     
     os.makedirs(output_dir, exist_ok=True)
@@ -23,5 +20,5 @@ def train_bpe_tokenizer(files_path, output_dir, vocab_size=32000):
     print(f"Đã lưu tokenizer tại: {out_file}")
 
 if __name__ == "__main__":
-    # Ví dụ đường dẫn (sẽ cấu hình lại ở Milestone 4)
-    print("Vui lòng cung cấp file dataset code thực tế để train.")
+    files = ["data/sample.py"]
+    train_bpe_tokenizer(files, "tokenizer/saved", vocab_size=1000) # Vocab nhỏ để test nhanh

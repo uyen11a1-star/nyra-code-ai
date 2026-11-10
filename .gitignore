@@ -34,3 +34,4 @@ cache/
 # Editor
 .vscode/
 .idea/
+tokenizer/saved/
