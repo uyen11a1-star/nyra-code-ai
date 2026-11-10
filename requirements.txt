@@ -9,3 +9,4 @@ uvicorn
 pydantic
 httpx
 python-dotenv
+tokenizers>=0.15.0
