@@ -2,7 +2,7 @@ import torch
 import time
 import os
 import sys
-from datasets import load_dataset, interleave_datasets
+from datasets import load_dataset
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model.config import NyraConfig
@@ -42,24 +42,14 @@ def train_real():
         total_tokens_trained = checkpoint.get('total_tokens', 0)
         print(f"Resume từ step {start_step} (Đã học {total_tokens_trained:,} tokens)")
 
-    print("Đang kết nối Streaming Datasets...")
-    ds_code = load_dataset("codeparrot/codeparrot-clean", split="train", streaming=True)
-    ds_wiki = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", streaming=True)
+    print("Đang kết nối Streaming Dataset (Codeparrot)...")
+    ds = load_dataset("codeparrot/codeparrot-clean", split="train", streaming=True)
     
-    ds = interleave_datasets([ds_code, ds_wiki], probabilities=[0.8, 0.2], seed=42)
-    
-    def batch_iterator(batch_size=200):
+    def batch_iterator(batch_size=100):
         batch = []
         for item in ds:
-            # SỬA LỖI TẠI ĐÂY: Lấy dữ liệu an toàn, bỏ qua nếu rỗng
             if "content" in item and item["content"] is not None:
-                text = item["content"]
-            elif "text" in item and item["text"] is not None:
-                text = item["text"]
-            else:
-                continue # Bỏ qua nếu không có dữ liệu
-            
-            batch.append(str(text)) # Ép kiểu chắc chắn thành string
+                batch.append(str(item["content"]))
             if len(batch) == batch_size:
                 yield batch
                 batch = []
@@ -82,14 +72,9 @@ def train_real():
     start_time = time.time()
 
     print(f"Mục tiêu: {TARGET_TOKENS:,} tokens | Batch: {BATCH_SIZE} | Seq: {SEQ_LEN}")
-    print(f"Tổng số step cần: {max_steps:,} (Đã chạy: {step:,})")
     
-    for batch_texts in batch_iterator(batch_size=200):
-        # Lọc lại lần nữa cho chắc chắn 100% không có phần tử None
-        batch_texts = [t for t in batch_texts if t]
-        if not batch_texts:
-            continue
-            
+    for batch_texts in batch_iterator(batch_size=100):
+        print(f"Đã lấy {len(batch_texts)} file code, đang tokenize...")
         encodings = hf_tokenizer.encode_batch(batch_texts)
         for enc in encodings:
             batch_tokens.extend(enc.ids)
@@ -116,7 +101,7 @@ def train_real():
                 if step % 10 == 0:
                     elapsed = time.time() - start_time
                     tokens_per_sec = tokens_per_step / elapsed if elapsed > 0 else 0
-                    print(f"Step {step} | Loss: {loss.item():.4f} | Tokens: {total_tokens_trained:,}/{TARGET_TOKENS:,} | Speed: {tokens_per_sec:.0f} tok/s")
+                    print(f"Step {step} | Loss: {loss.item():.4f} | Tokens: {total_tokens_trained:,} / {TARGET_TOKENS:,} | Speed: {tokens_per_sec:.0f} tok/s")
                     start_time = time.time()
 
                 if step > 0 and step % 500 == 0:
