@@ -18,7 +18,6 @@ def train_real():
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)
     scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
 
-    # TỰ ĐỘNG TẠO TOKENIZER NẾU CHƯA CÓ
     tokenizer_path = "tokenizer/saved/tokenizer.json"
     if not os.path.exists(tokenizer_path):
         print("Chưa tìm thấy Tokenizer, đang tự động tạo mới...")
@@ -30,7 +29,6 @@ def train_real():
 
     tokenizer = NyraTokenizer(tokenizer_path)
 
-    # Cơ chế Resume
     checkpoint_path = "checkpoints/nyra_model_latest.pt"
     os.makedirs("checkpoints", exist_ok=True)
     start_step = 0
@@ -45,7 +43,7 @@ def train_real():
     print("Đang kết nối Streaming Dataset...")
     ds = load_dataset("codeparrot/codeparrot-clean", split="train", streaming=True)
     
-    def batch_iterator(batch_size=100):
+    def batch_iterator(batch_size=1000):
         batch = []
         for item in ds:
             batch.append(item["content"])
@@ -55,16 +53,16 @@ def train_real():
         if batch:
             yield batch
 
-    print("Bắt đầu tokenize dữ liệu (Đa luồng)...")
     from tokenizers import Tokenizer
     hf_tokenizer = Tokenizer.from_file(tokenizer_path)
 
     model.train()
     step = start_step
-    max_steps = 10000 
+    max_steps = 50000 # Tăng số step lên để train lâu hơn
     
-    BATCH_SIZE = 32
-    SEQ_LEN = 512
+    # TỐI ƯU: Tăng Batch Size và Seq Len
+    BATCH_SIZE = 128
+    SEQ_LEN = 1024
     tokens_needed = BATCH_SIZE * SEQ_LEN
 
     batch_tokens = []
@@ -72,22 +70,19 @@ def train_real():
 
     print(f"Bắt đầu train (Batch: {BATCH_SIZE}, Seq: {SEQ_LEN})...")
     
-    # ĐÃ SỬA LỖI GENERATOR TẠI ĐÂY
-    for batch_texts in batch_iterator(batch_size=100):
+    for batch_texts in batch_iterator(batch_size=1000):
         encodings = hf_tokenizer.encode_batch(batch_texts)
         for enc in encodings:
             batch_tokens.extend(enc.ids)
             
             while len(batch_tokens) >= tokens_needed:
-                x_batch, y_batch = [], []
-                for i in range(BATCH_SIZE):
-                    chunk = batch_tokens[:SEQ_LEN]
-                    x_batch.append(chunk[:-1])
-                    y_batch.append(chunk[1:])
-                    batch_tokens = batch_tokens[SEQ_LEN:]
+                # TỐI ƯU: Dùng Tensor và view trực tiếp thay vì vòng lặp
+                chunk = torch.tensor(batch_tokens[:tokens_needed], dtype=torch.long).view(BATCH_SIZE, SEQ_LEN)
+                x = chunk[:, :-1].to(device)
+                y = chunk[:, 1:].to(device)
                 
-                x = torch.tensor(x_batch, dtype=torch.long).to(device)
-                y = torch.tensor(y_batch, dtype=torch.long).to(device)
+                # Xóa phần đã dùng bằng del (nhanh hơn gán lại mảng)
+                del batch_tokens[:tokens_needed]
                 
                 optimizer.zero_grad()
                 with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
