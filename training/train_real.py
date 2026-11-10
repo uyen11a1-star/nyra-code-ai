@@ -18,8 +18,17 @@ def train_real():
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)
     scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
 
-    # Load Tokenizer để lấy thông số
-    tokenizer = NyraTokenizer("tokenizer/saved/tokenizer.json")
+    # TỰ ĐỘNG TẠO TOKENIZER NẾU CHƯA CÓ
+    tokenizer_path = "tokenizer/saved/tokenizer.json"
+    if not os.path.exists(tokenizer_path):
+        print("Chưa tìm thấy Tokenizer, đang tự động tạo mới...")
+        os.makedirs("data", exist_ok=True)
+        with open("data/sample.py", "w") as f:
+            f.write("def test_fn():\n    return 'Hello Nyra'\n")
+        from tokenizer.train_tokenizer import train_bpe_tokenizer
+        train_bpe_tokenizer(["data/sample.py"], "tokenizer/saved", vocab_size=32000)
+
+    tokenizer = NyraTokenizer(tokenizer_path)
 
     # Cơ chế Resume
     checkpoint_path = "checkpoints/nyra_model_latest.pt"
@@ -36,7 +45,6 @@ def train_real():
     print("Đang kết nối Streaming Dataset...")
     ds = load_dataset("codeparrot/codeparrot-clean", split="train", streaming=True)
     
-    # TỐI ƯU HÓA: Gom 100 file code lại với nhau để tokenize 1 lần (nhanh hơn rất nhiều)
     def batch_iterator(batch_size=100):
         batch = []
         for item in ds:
@@ -46,18 +54,14 @@ def train_real():
                 batch = []
 
     print("Bắt đầu tokenize dữ liệu (Đa luồng)...")
-    # Sử dụng tokenizer của HuggingFace để tokenize song song cực nhanh
     from tokenizers import Tokenizer
-    hf_tokenizer = Tokenizer.from_file("tokenizer/saved/tokenizer.json")
-    
-    # Đưa luồng dữ liệu qua tokenizer
+    hf_tokenizer = Tokenizer.from_file(tokenizer_path)
     tokenized_ds = hf_tokenizer.encode_batch(batch_iterator()) 
 
     model.train()
     step = start_step
-    max_steps = 10000 # Train 10,000 steps
+    max_steps = 10000 
     
-    # Tăng kích thước Batch và Seq lên tối đa để tận dụng 102GB VRAM
     BATCH_SIZE = 32
     SEQ_LEN = 512
     tokens_needed = BATCH_SIZE * SEQ_LEN
