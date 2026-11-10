@@ -83,7 +83,6 @@ def train_real():
         batch_size=BATCH_SIZE, 
         num_workers=NUM_WORKERS, 
         collate_fn=collate_fn,
-        prefetch_factor=2
     )
 
     model.train()
