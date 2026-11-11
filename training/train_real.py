@@ -212,7 +212,7 @@ def train_real():
         for x, y in dataloader:
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_cuda):
-                logits = model(x)
+                logits, _ = model(x)
                 loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
             scaler.scale(loss / GRAD_ACCUM).backward()
             loss_sum += loss.detach() / GRAD_ACCUM
