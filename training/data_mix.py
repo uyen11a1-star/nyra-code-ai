@@ -9,7 +9,7 @@ import os
 DATASET = "bigcode/the-stack-dedup"
 # tên thư mục data/<tên> -> trọng số (%). Thiếu thư mục nào thì bỏ và chuẩn hóa lại (có in cảnh báo).
 LANG_MIX = {
-    "python": 30, "javascript": 15, "typescript": 12, "java": 10, "c++": 8, "c": 6,
+    "python": 30, "javascript": 15, "typescript": 12, "java": 10, "cpp": 8, "c": 6,
     "html": 4, "css": 2, "sql": 3, "shell": 3, "markdown": 7,
 }
 VAL_MOD = 200  # ~0.5% tài liệu (theo hash nội dung) dành cho validation, không bao giờ dùng để train
