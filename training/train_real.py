@@ -7,7 +7,6 @@ import queue
 import signal
 import threading
 import numpy as np
-from datasets import load_dataset
 from torch.utils.data import IterableDataset, DataLoader
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,7 +14,7 @@ from model.config import NyraConfig
 from model.transformer import NyraModel
 from tokenizer.tokenizer import NyraTokenizer
 from tokenizers import Tokenizer
-from training import hub_sync
+from training import hub_sync, data_mix
 
 # ---- Cấu hình (đổi bằng biến môi trường, không cần sửa code) ----
 CKPT_DIR = os.environ.get("NYRA_CKPT_DIR", "checkpoints")
@@ -25,6 +24,9 @@ GLOBAL_BATCH = 128                                                    # số seq
 TARGET_TOKENS = int(os.environ.get("NYRA_TARGET_TOKENS", 5_000_000_000))
 MAX_LR, MIN_LR, WARMUP_STEPS = 3e-4, 3e-5, 200
 LOG_EVERY = 10
+TOKENIZER_DIR = os.environ.get("NYRA_TOKENIZER_DIR", "tokenizer/saved")
+EVAL_EVERY = int(os.environ.get("NYRA_EVAL_EVERY", 500))
+VAL_SEQS = 1024
 DATA_SEED = 1234
 
 
@@ -88,7 +90,7 @@ class StreamingTokenDataset(IterableDataset):
             texts = []
             n = (len(buf) - 1) // S
             for k in range(n):
-                yield torch.from_numpy(buf[k * S:(k + 1) * S + 1].copy())  # chunk S+1, gối 1 token
+                yield buf[k * S:(k + 1) * S + 1].copy()  # chunk S+1, gối 1 token
             buf = buf[n * S:]
 
     def __iter__(self):
@@ -96,9 +98,45 @@ class StreamingTokenDataset(IterableDataset):
 
 
 def collate_fn(batch):
-    x = torch.stack([item[:-1] for item in batch])
-    y = torch.stack([item[1:] for item in batch])
-    return x, y
+    arr = torch.from_numpy(np.stack(batch))
+    return arr[:, :-1].contiguous(), arr[:, 1:].contiguous()
+
+
+def load_val_tokens(hf_tokenizer, eos_id):
+    """Tập validation cố định (tài liệu bucket-hash riêng, không có trong train). Tạo 1 lần, cache + lên Hub."""
+    name = f"val_{SEQ_LEN}.npy"
+    path = os.path.join(CKPT_DIR, name)
+    if not os.path.exists(path):
+        hub_sync.pull(name, CKPT_DIR)
+    if os.path.exists(path):
+        return np.load(path)
+    print("Đang tạo tập validation (một lần, vài phút)...")
+    ds = StreamingTokenDataset(data_mix.make_stream(seed=999, want_val=True), hf_tokenizer, SEQ_LEN, eos_id)
+    chunks = []
+    for c in ds._chunks():
+        chunks.append(c)
+        if len(chunks) >= VAL_SEQS:
+            break
+    arr = np.stack(chunks).astype(np.int32)
+    np.save(path, arr)
+    hub_sync.push(path, name, wait=True)
+    return arr
+
+
+@torch.no_grad()
+def evaluate(model, val, device, use_cuda, amp_dtype, bs):
+    model.eval()
+    total, n = 0.0, 0
+    for i in range(0, len(val), bs):
+        b = torch.from_numpy(val[i:i + bs].astype(np.int64)).to(device)
+        x, y = b[:, :-1], b[:, 1:]
+        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_cuda):
+            logits, _ = model(x)
+        total += torch.nn.functional.cross_entropy(
+            logits.reshape(-1, logits.size(-1)).float(), y.reshape(-1), reduction="sum").item()
+        n += y.numel()
+    model.train()
+    return total / n
 
 
 def get_lr(step, max_steps):
@@ -135,9 +173,9 @@ def train_real():
         lr=MAX_LR, betas=(0.9, 0.95), fused=use_cuda,
     )
 
-    tokenizer_path = "tokenizer/saved/tokenizer.json"
+    tokenizer_path = os.path.join(TOKENIZER_DIR, "tokenizer.json")
     if not os.path.exists(tokenizer_path):
-        hub_sync.pull("tokenizer.json", "tokenizer/saved")
+        hub_sync.pull("tokenizer.json", TOKENIZER_DIR)
     if not os.path.exists(tokenizer_path):
         raise SystemExit("Chưa có tokenizer. Chạy trước: python -m tokenizer.train_tokenizer")
     tokenizer = NyraTokenizer(tokenizer_path)
@@ -161,10 +199,11 @@ def train_real():
         del ckpt
         print(f"Resume từ step {start_step} (Đã học {total_tokens_trained:,} tokens)")
 
-    print("Đang kết nối Streaming Dataset...")
-    ds = load_dataset("codeparrot/codeparrot-clean", split="train", streaming=True)
+    print("Đang kết nối Streaming Dataset (The Stack dedup, nhiều ngôn ngữ)...")
     # seed đổi theo step để mỗi lần resume không lặp lại đúng phần đầu dataset
-    ds = ds.shuffle(seed=DATA_SEED + start_step, buffer_size=10_000)
+    ds = data_mix.make_stream(seed=DATA_SEED + start_step, want_val=False)
+    val_tokens = load_val_tokens(hf_tokenizer, tokenizer.eos_token_id)
+    print(f"Validation: {len(val_tokens)} sequences x {SEQ_LEN}")
 
     BATCH_SIZE = int(os.environ.get("NYRA_BATCH", default_micro_batch(device)))
     GRAD_ACCUM = max(1, GLOBAL_BATCH // BATCH_SIZE)
@@ -243,6 +282,10 @@ def train_real():
                 print(f"Step {state['step']} | Loss: {step_loss:.4f} | LR: {lr:.2e} | "
                       f"Tokens: {state['tokens']:,} / {TARGET_TOKENS:,} | Speed: {tps:.0f} tok/s{mem}")
                 last_log_time, last_log_step = now, state["step"]
+
+            if state["step"] % EVAL_EVERY == 0:
+                vl = evaluate(model, val_tokens, device, use_cuda, amp_dtype, BATCH_SIZE)
+                print(f"Step {state['step']} | VAL loss: {vl:.4f} | VAL ppl: {math.exp(vl):.2f}")
 
             if time.time() - state["last_save"] >= SAVE_EVERY_MIN * 60:
                 save()

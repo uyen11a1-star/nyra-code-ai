@@ -44,10 +44,9 @@ def train_bpe_from_iterator(texts, output_dir, vocab_size=32000):
     return out
 
 
-def _stream_codeparrot(num_docs):
-    from datasets import load_dataset
-    ds = load_dataset("codeparrot/codeparrot-clean", split="train", streaming=True)
-    ds = ds.shuffle(seed=0, buffer_size=10_000)
+def _stream_mix(num_docs):
+    from training import data_mix
+    ds = data_mix.make_stream(seed=0, want_val=False)
     for i, item in enumerate(ds):
         if i >= num_docs:
             break
@@ -57,9 +56,10 @@ def _stream_codeparrot(num_docs):
 
 if __name__ == "__main__":
     # python -m tokenizer.train_tokenizer [num_docs] [vocab_size]
-    num_docs = int(sys.argv[1]) if len(sys.argv) > 1 else 50_000
-    vocab = int(sys.argv[2]) if len(sys.argv) > 2 else 32000
-    path = train_bpe_from_iterator(_stream_codeparrot(num_docs), "tokenizer/saved", vocab_size=vocab)
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    num_docs = int(sys.argv[1]) if len(sys.argv) > 1 else 100_000
+    vocab = int(sys.argv[2]) if len(sys.argv) > 2 else 32000
+    out_dir = os.environ.get("NYRA_TOKENIZER_DIR", "tokenizer/saved")
+    path = train_bpe_from_iterator(_stream_mix(num_docs), out_dir, vocab_size=vocab)
     from training import hub_sync
     hub_sync.push(path, "tokenizer.json", wait=True)

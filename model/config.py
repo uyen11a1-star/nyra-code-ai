@@ -5,7 +5,7 @@ class NyraConfig:
     vocab_size: int = 32000
     hidden_size: int = 1024
     intermediate_size: int = 2752
-    num_hidden_layers: int = 21   
+    num_hidden_layers: int = 23   
     num_attention_heads: int = 16 
     # SỬA LỖI: Giảm KV heads để dùng GQA (tiết kiệm VRAM khi dùng KV Cache)
     num_key_value_heads: int = 8  
