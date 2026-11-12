@@ -199,6 +199,11 @@ def train_real():
         del ckpt
         print(f"Resume từ step {start_step} (Đã học {total_tokens_trained:,} tokens)")
 
+    fwd = model  # fwd: dùng để train; model gốc vẫn dùng cho eval và lưu checkpoint
+    if os.environ.get("NYRA_COMPILE") == "1":
+        print("torch.compile: BẬT (vài step đầu chậm vì compile)")
+        fwd = torch.compile(model)
+
     print("Đang kết nối Streaming Dataset (The Stack dedup, nhiều ngôn ngữ)...")
     # seed đổi theo step để mỗi lần resume không lặp lại đúng phần đầu dataset
     ds = data_mix.make_stream(seed=DATA_SEED + start_step, want_val=False)
@@ -251,7 +256,7 @@ def train_real():
         for x, y in dataloader:
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_cuda):
-                logits, _ = model(x)
+                logits, _ = fwd(x)
                 loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
             scaler.scale(loss / GRAD_ACCUM).backward()
             loss_sum += loss.detach() / GRAD_ACCUM
